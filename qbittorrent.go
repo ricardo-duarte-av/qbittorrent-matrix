@@ -166,7 +166,7 @@ func (m *Monitor) poll(ctx context.Context) error {
 		}
 	}
 
-	// Detect completed and errored torrents.
+	// Detect completed, seeding, and errored torrents.
 	for hash, t := range current {
 		prev, exists := m.known[hash]
 		if !exists {
@@ -174,6 +174,22 @@ func (m *Monitor) poll(ctx context.Context) error {
 		}
 		if prev.Progress < 1.0 && t.Progress >= 1.0 {
 			msg := fmt.Sprintf("✅ Download completed: **%s** (%s)", t.Name, formatSize(t.Size))
+			if err := m.bot.SendNotice(ctx, msg); err != nil {
+				log.Printf("send notice: %v", err)
+			}
+		}
+		// Started seeding: entered a seeding state from a non-seeding state.
+		// Guard with prev.Progress >= 1.0 to avoid firing on the same tick as
+		// "completed" (downloading→uploading).
+		if prev.Progress >= 1.0 && !isSeedingState(prev.State) && isSeedingState(t.State) {
+			msg := fmt.Sprintf("🌱 Started seeding: **%s**", t.Name)
+			if err := m.bot.SendNotice(ctx, msg); err != nil {
+				log.Printf("send notice: %v", err)
+			}
+		}
+		// Stopped seeding: left a seeding state while the torrent still exists.
+		if isSeedingState(prev.State) && !isSeedingState(t.State) {
+			msg := fmt.Sprintf("⏸️ Stopped seeding: **%s**", t.Name)
 			if err := m.bot.SendNotice(ctx, msg); err != nil {
 				log.Printf("send notice: %v", err)
 			}
@@ -301,6 +317,17 @@ func formatSpeed(bps int64) string {
 		return "0 B/s"
 	}
 	return formatSize(bps) + "/s"
+}
+
+// isSeedingState reports whether the torrent is in any seeding-related state
+// (actively uploading, stalled waiting for peers, queued, or being rechecked
+// after completion). Transitions into/out of this set trigger seeding notices.
+func isSeedingState(state string) bool {
+	switch state {
+	case "uploading", "forcedUP", "stalledUP", "queuedUP", "checkingUP":
+		return true
+	}
+	return false
 }
 
 func formatState(state string) string {
