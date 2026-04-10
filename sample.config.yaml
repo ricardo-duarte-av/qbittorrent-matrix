@@ -1,0 +1,20 @@
+matrix:
+  homeserver: "https://matrix.example.com"
+  user_id: "@yourbot:matrix.example.com"
+  # Provide either access_token OR username+password.
+  # If access_token is set, username/password are ignored.
+  access_token: ""
+  username: "yourbot"
+  password: "changeme"
+  room_id: "!roomid:matrix.example.com"
+
+qbittorrent:
+  url: "http://localhost:8080"
+  username: "admin"
+  password: "adminadmin"
+  # How often to poll qBittorrent for changes, in seconds.
+  poll_interval: 30
+  # HTTP Basic Auth credentials for a reverse proxy in front of qBittorrent
+  # (e.g. nginx/openresty). Leave empty if accessing qBittorrent directly.
+  http_username: ""
+  http_password: ""
