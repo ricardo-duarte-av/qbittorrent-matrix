@@ -13,9 +13,10 @@ import (
 )
 
 // CommandFunc is the signature for bot command handlers.
-// It returns a plain-text fallback and an HTML body (may be empty, falling
-// back to plain text), plus any error.
-type CommandFunc func(ctx context.Context, args string) (plain, html string, err error)
+// It returns slices of plain-text fallbacks and HTML bodies (one entry per
+// message to send), plus any error. Returning a single-element slice is the
+// common case; multiple elements cause multiple messages to be sent in order.
+type CommandFunc func(ctx context.Context, args string) (plains, htmls []string, err error)
 
 type MatrixBot struct {
 	client   *mautrix.Client
@@ -129,13 +130,19 @@ func (b *MatrixBot) handleMessage(ctx context.Context, evt *event.Event) {
 
 	log.Printf("Command !%s from %s", cmd, evt.Sender)
 
-	plain, htmlBody, err := fn(ctx, args)
+	plains, htmls, err := fn(ctx, args)
 	if err != nil {
 		log.Printf("command !%s error: %v", cmd, err)
 		_ = b.SendNotice(ctx, fmt.Sprintf("Error running !%s: %v", cmd, err))
 		return
 	}
-	if err := b.sendHTML(ctx, plain, htmlBody); err != nil {
-		log.Printf("send command response for !%s: %v", cmd, err)
+	for i := range plains {
+		h := ""
+		if i < len(htmls) {
+			h = htmls[i]
+		}
+		if err := b.sendHTML(ctx, plains[i], h); err != nil {
+			log.Printf("send command response for !%s (part %d/%d): %v", cmd, i+1, len(plains), err)
+		}
 	}
 }

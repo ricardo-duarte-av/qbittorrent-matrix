@@ -363,24 +363,41 @@ func (m *Monitor) RegisterCommands(bot *MatrixBot) {
 	bot.RegisterCommand("list", m.cmdList)
 }
 
-func (m *Monitor) cmdList(ctx context.Context, _ string) (plain, htmlBody string, err error) {
+// maxEventPayload is the combined character budget for the plain body and
+// formatted_body of a single Matrix message. The spec hard-caps the full JSON
+// event at 65536 bytes; we target ~55000 to leave headroom for the JSON
+// envelope and other event fields.
+const maxEventPayload = 55000
+
+func (m *Monitor) cmdList(ctx context.Context, _ string) (plains, htmls []string, err error) {
 	torrents, err := m.fetchTorrents()
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
 
 	sort.Slice(torrents, func(i, j int) bool {
 		return strings.ToLower(torrents[i].Name) < strings.ToLower(torrents[j].Name)
 	})
 
-	var buf bytes.Buffer
-	buf.WriteString("<table><thead><tr>")
-	for _, h := range []string{"Name", "Status", "Progress", "Size", "Seeds", "Peers", "↓ Speed", "↑ Speed", "Ratio", "Added On", "Last Activity"} {
-		fmt.Fprintf(&buf, "<th>%s</th>", h)
-	}
-	buf.WriteString("</tr></thead><tbody>")
+	headers := []string{"Name", "Status", "Progress", "Size", "Seeds", "Peers", "↓ Speed", "↑ Speed", "Ratio", "Added On", "Last Activity"}
 
-	var plainRows []string
+	buildTableHeader := func() string {
+		var b bytes.Buffer
+		b.WriteString("<table><thead><tr>")
+		for _, h := range headers {
+			fmt.Fprintf(&b, "<th>%s</th>", h)
+		}
+		b.WriteString("</tr></thead><tbody>")
+		return b.String()
+	}
+	tableFooter := "</tbody></table>"
+
+	type rowData struct {
+		htmlRow  string
+		plainRow string
+	}
+
+	rows := make([]rowData, 0, len(torrents))
 	for _, t := range torrents {
 		progress := fmt.Sprintf("%.1f%%", t.Progress*100)
 		size := formatSize(t.Size)
@@ -391,7 +408,8 @@ func (m *Monitor) cmdList(ctx context.Context, _ string) (plain, htmlBody string
 		addedOn := formatUnixTime(t.AddedOn)
 		lastActivity := formatRelativeTime(t.LastActivity)
 
-		buf.WriteString("<tr>")
+		var rb bytes.Buffer
+		rb.WriteString("<tr>")
 		for _, cell := range []string{
 			html.EscapeString(t.Name),
 			html.EscapeString(state),
@@ -405,18 +423,65 @@ func (m *Monitor) cmdList(ctx context.Context, _ string) (plain, htmlBody string
 			addedOn,
 			lastActivity,
 		} {
-			fmt.Fprintf(&buf, "<td>%s</td>", cell)
+			fmt.Fprintf(&rb, "<td>%s</td>", cell)
 		}
-		buf.WriteString("</tr>")
+		rb.WriteString("</tr>")
 
-		plainRows = append(plainRows, fmt.Sprintf(
-			"%-60s | %-18s | %6s | %9s | %4d seeds | %4d peers | ↓ %-10s ↑ %-10s | ratio %s | added %s | active %s",
-			t.Name, state, progress, size, t.NumSeeds, t.NumLeechs, dl, up, ratio, addedOn, lastActivity,
-		))
+		rows = append(rows, rowData{
+			htmlRow: rb.String(),
+			plainRow: fmt.Sprintf(
+				"%-60s | %-18s | %6s | %9s | %4d seeds | %4d peers | ↓ %-10s ↑ %-10s | ratio %s | added %s | active %s",
+				t.Name, state, progress, size, t.NumSeeds, t.NumLeechs, dl, up, ratio, addedOn, lastActivity,
+			),
+		})
 	}
 
-	buf.WriteString("</tbody></table>")
+	// Chunk rows so that the combined HTML + plain size stays within the budget.
+	// Both bodies are included in the Matrix JSON event, so both count.
+	total := len(torrents)
+	tableHeader := buildTableHeader()
+	htmlOverhead := len(tableHeader) + len(tableFooter)
 
-	header := fmt.Sprintf("%d torrent(s)\n", len(torrents))
-	return header + strings.Join(plainRows, "\n"), buf.String(), nil
+	var (
+		chunkStart   = 0
+		currentSize  = htmlOverhead // start with fixed HTML table overhead
+		htmlChunk    bytes.Buffer
+		plainChunk   []string
+	)
+	htmlChunk.WriteString(tableHeader)
+
+	flush := func(end int) {
+		htmlChunk.WriteString(tableFooter)
+		header := fmt.Sprintf("%d torrent(s)", total)
+		if len(plains) > 0 || end < total {
+			header = fmt.Sprintf("%d torrent(s) (part %d)", total, len(plains)+1)
+		}
+		plains = append(plains, header+"\n"+strings.Join(plainChunk, "\n"))
+		htmls = append(htmls, htmlChunk.String())
+
+		htmlChunk.Reset()
+		htmlChunk.WriteString(tableHeader)
+		plainChunk = plainChunk[:0]
+		currentSize = htmlOverhead
+		chunkStart = end
+	}
+
+	for i, row := range rows {
+		rowSize := len(row.htmlRow) + len(row.plainRow)
+		if currentSize+rowSize > maxEventPayload && i > chunkStart {
+			flush(i)
+		}
+		htmlChunk.WriteString(row.htmlRow)
+		plainChunk = append(plainChunk, row.plainRow)
+		currentSize += rowSize
+	}
+	// Flush the last (or only) chunk.
+	flush(total)
+
+	// If only one part, drop the "(part 1)" suffix from the header.
+	if len(plains) == 1 {
+		plains[0] = fmt.Sprintf("%d torrent(s)\n", total) + strings.SplitN(plains[0], "\n", 2)[1]
+	}
+
+	return plains, htmls, nil
 }
