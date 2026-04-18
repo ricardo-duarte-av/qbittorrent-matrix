@@ -1,6 +1,6 @@
 services:
   qbittorrent-matrix:
-    build: .
+    build: https://github.com/ricardo-duarte-av/qbittorrent-matrix.git
     image: qbittorrent-matrix
     container_name: qbittorrent-matrix
     restart: unless-stopped
