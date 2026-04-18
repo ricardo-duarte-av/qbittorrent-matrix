@@ -559,13 +559,13 @@ func (m *Monitor) cmdUploading(ctx context.Context, _ string) (plains, htmls []s
 
 	var seeding []qbt.TorrentInfo
 	for _, t := range torrents {
-		if isSeedingState(t.State) {
+		if isSeedingState(t.State) && t.Upspeed > 0 {
 			seeding = append(seeding, t)
 		}
 	}
 
 	if len(seeding) == 0 {
-		return []string{"No torrents currently uploading."}, []string{"<p>No torrents currently uploading.</p>"}, nil
+		return []string{"No torrents currently uploading (all seeds are idle)."}, []string{"<p>No torrents currently uploading (all seeds are idle).</p>"}, nil
 	}
 
 	sort.Slice(seeding, func(i, j int) bool {
