@@ -2,7 +2,6 @@ services:
   qbittorrent-matrix:
     build:
       context: https://github.com/ricardo-duarte-av/qbittorrent-matrix.git
-      no_cache: true
     image: qbittorrent-matrix
     container_name: qbittorrent-matrix
     restart: unless-stopped
