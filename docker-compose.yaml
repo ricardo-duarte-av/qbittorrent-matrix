@@ -5,5 +5,5 @@ services:
     image: qbittorrent-matrix
     container_name: qbittorrent-matrix
     restart: unless-stopped
-  volumes:
-    - ./config.yaml:/app/config.yaml:ro
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
