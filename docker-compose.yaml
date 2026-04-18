@@ -1,8 +1,10 @@
 services:
   qbittorrent-matrix:
-    build: https://github.com/ricardo-duarte-av/qbittorrent-matrix.git
+    build:
+      context: https://github.com/ricardo-duarte-av/qbittorrent-matrix.git
+      no_cache: true
     image: qbittorrent-matrix
     container_name: qbittorrent-matrix
     restart: unless-stopped
-    volumes:
+volumes:
       - ./config.yaml:/app/config.yaml:ro
