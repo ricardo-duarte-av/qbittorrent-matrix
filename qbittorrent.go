@@ -361,6 +361,9 @@ func formatState(state string) string {
 // Must be called before bot.Start().
 func (m *Monitor) RegisterCommands(bot *MatrixBot) {
 	bot.RegisterCommand("list", m.cmdList)
+	bot.RegisterCommand("download", m.cmdDownloading)
+	bot.RegisterCommand("downloading", m.cmdDownloading)
+	bot.RegisterCommand("uploading", m.cmdUploading)
 }
 
 // maxEventPayload is the combined character budget for the plain body and
@@ -368,6 +371,92 @@ func (m *Monitor) RegisterCommands(bot *MatrixBot) {
 // event at 65536 bytes; we target ~55000 to leave headroom for the JSON
 // envelope and other event fields.
 const maxEventPayload = 55000
+
+func isDownloadingState(state string) bool {
+	switch state {
+	case "downloading", "forcedDL", "stalledDL", "queuedDL", "checkingDL", "metaDL":
+		return true
+	}
+	return false
+}
+
+func formatETA(seconds int64) string {
+	if seconds < 0 || seconds >= 8640000 {
+		return "∞"
+	}
+	if seconds == 0 {
+		return "done"
+	}
+	h := seconds / 3600
+	m := (seconds % 3600) / 60
+	s := seconds % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+type tableRow struct {
+	htmlRow  string
+	plainRow string
+}
+
+// chunkTable splits rows into Matrix messages that fit within maxEventPayload.
+func chunkTable(label string, headers []string, rows []tableRow) (plains, htmls []string) {
+	buildHeader := func() string {
+		var b bytes.Buffer
+		b.WriteString("<table><thead><tr>")
+		for _, h := range headers {
+			fmt.Fprintf(&b, "<th>%s</th>", h)
+		}
+		b.WriteString("</tr></thead><tbody>")
+		return b.String()
+	}
+	const footer = "</tbody></table>"
+	tableHeader := buildHeader()
+	overhead := len(tableHeader) + len(footer)
+
+	total := len(rows)
+	chunkStart := 0
+	currentSize := overhead
+	var htmlChunk bytes.Buffer
+	var plainChunk []string
+	htmlChunk.WriteString(tableHeader)
+
+	flush := func(end int) {
+		htmlChunk.WriteString(footer)
+		header := fmt.Sprintf("%d %s", total, label)
+		if len(plains) > 0 || end < total {
+			header = fmt.Sprintf("%d %s (part %d)", total, label, len(plains)+1)
+		}
+		plains = append(plains, header+"\n"+strings.Join(plainChunk, "\n"))
+		htmls = append(htmls, htmlChunk.String())
+		htmlChunk.Reset()
+		htmlChunk.WriteString(tableHeader)
+		plainChunk = plainChunk[:0]
+		currentSize = overhead
+		chunkStart = end
+	}
+
+	for i, row := range rows {
+		rowSize := len(row.htmlRow) + len(row.plainRow)
+		if currentSize+rowSize > maxEventPayload && i > chunkStart {
+			flush(i)
+		}
+		htmlChunk.WriteString(row.htmlRow)
+		plainChunk = append(plainChunk, row.plainRow)
+		currentSize += rowSize
+	}
+	flush(total)
+
+	if len(plains) == 1 {
+		plains[0] = fmt.Sprintf("%d %s\n", total, label) + strings.SplitN(plains[0], "\n", 2)[1]
+	}
+	return plains, htmls
+}
 
 func (m *Monitor) cmdList(ctx context.Context, _ string) (plains, htmls []string, err error) {
 	torrents, err := m.fetchTorrents()
@@ -380,24 +469,7 @@ func (m *Monitor) cmdList(ctx context.Context, _ string) (plains, htmls []string
 	})
 
 	headers := []string{"Name", "Status", "Progress", "Size", "Seeds", "Peers", "↓ Speed", "↑ Speed", "Ratio", "Added On", "Last Activity"}
-
-	buildTableHeader := func() string {
-		var b bytes.Buffer
-		b.WriteString("<table><thead><tr>")
-		for _, h := range headers {
-			fmt.Fprintf(&b, "<th>%s</th>", h)
-		}
-		b.WriteString("</tr></thead><tbody>")
-		return b.String()
-	}
-	tableFooter := "</tbody></table>"
-
-	type rowData struct {
-		htmlRow  string
-		plainRow string
-	}
-
-	rows := make([]rowData, 0, len(torrents))
+	rows := make([]tableRow, 0, len(torrents))
 	for _, t := range torrents {
 		progress := fmt.Sprintf("%.1f%%", t.Progress*100)
 		size := formatSize(t.Size)
@@ -411,23 +483,15 @@ func (m *Monitor) cmdList(ctx context.Context, _ string) (plains, htmls []string
 		var rb bytes.Buffer
 		rb.WriteString("<tr>")
 		for _, cell := range []string{
-			html.EscapeString(t.Name),
-			html.EscapeString(state),
-			progress,
-			size,
-			fmt.Sprintf("%d", t.NumSeeds),
-			fmt.Sprintf("%d", t.NumLeechs),
-			dl,
-			up,
-			ratio,
-			addedOn,
-			lastActivity,
+			html.EscapeString(t.Name), html.EscapeString(state), progress, size,
+			fmt.Sprintf("%d", t.NumSeeds), fmt.Sprintf("%d", t.NumLeechs),
+			dl, up, ratio, addedOn, lastActivity,
 		} {
 			fmt.Fprintf(&rb, "<td>%s</td>", cell)
 		}
 		rb.WriteString("</tr>")
 
-		rows = append(rows, rowData{
+		rows = append(rows, tableRow{
 			htmlRow: rb.String(),
 			plainRow: fmt.Sprintf(
 				"%-60s | %-18s | %6s | %9s | %4d seeds | %4d peers | ↓ %-10s ↑ %-10s | ratio %s | added %s | active %s",
@@ -436,52 +500,99 @@ func (m *Monitor) cmdList(ctx context.Context, _ string) (plains, htmls []string
 		})
 	}
 
-	// Chunk rows so that the combined HTML + plain size stays within the budget.
-	// Both bodies are included in the Matrix JSON event, so both count.
-	total := len(torrents)
-	tableHeader := buildTableHeader()
-	htmlOverhead := len(tableHeader) + len(tableFooter)
+	plains, htmls = chunkTable("torrent(s)", headers, rows)
+	return plains, htmls, nil
+}
 
-	var (
-		chunkStart   = 0
-		currentSize  = htmlOverhead // start with fixed HTML table overhead
-		htmlChunk    bytes.Buffer
-		plainChunk   []string
-	)
-	htmlChunk.WriteString(tableHeader)
+func (m *Monitor) cmdDownloading(ctx context.Context, _ string) (plains, htmls []string, err error) {
+	torrents, err := m.fetchTorrents()
+	if err != nil {
+		return nil, nil, err
+	}
 
-	flush := func(end int) {
-		htmlChunk.WriteString(tableFooter)
-		header := fmt.Sprintf("%d torrent(s)", total)
-		if len(plains) > 0 || end < total {
-			header = fmt.Sprintf("%d torrent(s) (part %d)", total, len(plains)+1)
+	var active []qbt.TorrentInfo
+	for _, t := range torrents {
+		if isDownloadingState(t.State) {
+			active = append(active, t)
 		}
-		plains = append(plains, header+"\n"+strings.Join(plainChunk, "\n"))
-		htmls = append(htmls, htmlChunk.String())
-
-		htmlChunk.Reset()
-		htmlChunk.WriteString(tableHeader)
-		plainChunk = plainChunk[:0]
-		currentSize = htmlOverhead
-		chunkStart = end
 	}
 
-	for i, row := range rows {
-		rowSize := len(row.htmlRow) + len(row.plainRow)
-		if currentSize+rowSize > maxEventPayload && i > chunkStart {
-			flush(i)
+	if len(active) == 0 {
+		return []string{"No torrents currently downloading."}, []string{"<p>No torrents currently downloading.</p>"}, nil
+	}
+
+	sort.Slice(active, func(i, j int) bool {
+		return active[i].Progress > active[j].Progress
+	})
+
+	headers := []string{"Name", "Status", "Progress", "Size", "↓ Speed", "ETA"}
+	rows := make([]tableRow, 0, len(active))
+	for _, t := range active {
+		progress := fmt.Sprintf("%.1f%%", t.Progress*100)
+		size := formatSize(t.Size)
+		dl := formatSpeed(t.Dlspeed)
+		state := formatState(t.State)
+		eta := formatETA(t.Eta)
+
+		var rb bytes.Buffer
+		rb.WriteString("<tr>")
+		for _, cell := range []string{html.EscapeString(t.Name), html.EscapeString(state), progress, size, dl, eta} {
+			fmt.Fprintf(&rb, "<td>%s</td>", cell)
 		}
-		htmlChunk.WriteString(row.htmlRow)
-		plainChunk = append(plainChunk, row.plainRow)
-		currentSize += rowSize
-	}
-	// Flush the last (or only) chunk.
-	flush(total)
+		rb.WriteString("</tr>")
 
-	// If only one part, drop the "(part 1)" suffix from the header.
-	if len(plains) == 1 {
-		plains[0] = fmt.Sprintf("%d torrent(s)\n", total) + strings.SplitN(plains[0], "\n", 2)[1]
+		rows = append(rows, tableRow{
+			htmlRow:  rb.String(),
+			plainRow: fmt.Sprintf("%-60s | %-18s | %6s | %9s | ↓ %-10s | ETA %s", t.Name, state, progress, size, dl, eta),
+		})
 	}
 
+	plains, htmls = chunkTable("downloading", headers, rows)
+	return plains, htmls, nil
+}
+
+func (m *Monitor) cmdUploading(ctx context.Context, _ string) (plains, htmls []string, err error) {
+	torrents, err := m.fetchTorrents()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var seeding []qbt.TorrentInfo
+	for _, t := range torrents {
+		if isSeedingState(t.State) {
+			seeding = append(seeding, t)
+		}
+	}
+
+	if len(seeding) == 0 {
+		return []string{"No torrents currently uploading."}, []string{"<p>No torrents currently uploading.</p>"}, nil
+	}
+
+	sort.Slice(seeding, func(i, j int) bool {
+		return seeding[i].Upspeed > seeding[j].Upspeed
+	})
+
+	headers := []string{"Name", "Status", "↑ Speed", "Ratio", "Uploaded"}
+	rows := make([]tableRow, 0, len(seeding))
+	for _, t := range seeding {
+		up := formatSpeed(t.Upspeed)
+		ratio := fmt.Sprintf("%.2f", t.Ratio)
+		uploaded := formatSize(t.Uploaded)
+		state := formatState(t.State)
+
+		var rb bytes.Buffer
+		rb.WriteString("<tr>")
+		for _, cell := range []string{html.EscapeString(t.Name), html.EscapeString(state), up, ratio, uploaded} {
+			fmt.Fprintf(&rb, "<td>%s</td>", cell)
+		}
+		rb.WriteString("</tr>")
+
+		rows = append(rows, tableRow{
+			htmlRow:  rb.String(),
+			plainRow: fmt.Sprintf("%-60s | %-18s | ↑ %-10s | ratio %s | uploaded %s", t.Name, state, up, ratio, uploaded),
+		})
+	}
+
+	plains, htmls = chunkTable("uploading", headers, rows)
 	return plains, htmls, nil
 }
