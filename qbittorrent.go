@@ -145,6 +145,17 @@ func (m *Monitor) snapshot() error {
 	return nil
 }
 
+// notify sends an event notice with the torrent name emphasised. Matrix does
+// not render markdown, so the emphasis has to go in an HTML body; the plain
+// body is the unformatted fallback.
+func (m *Monitor) notify(ctx context.Context, prefix, name, suffix string) {
+	plain := prefix + name + suffix
+	htmlBody := html.EscapeString(prefix) + "<b>" + html.EscapeString(name) + "</b>" + html.EscapeString(suffix)
+	if err := m.bot.sendHTML(ctx, plain, htmlBody); err != nil {
+		log.Printf("send notice: %v", err)
+	}
+}
+
 func (m *Monitor) poll(ctx context.Context) error {
 	torrents, err := m.fetchTorrents()
 	if err != nil {
@@ -159,10 +170,7 @@ func (m *Monitor) poll(ctx context.Context) error {
 	// Detect new torrents.
 	for hash, t := range current {
 		if _, exists := m.known[hash]; !exists {
-			msg := fmt.Sprintf("⬇️ New download added: **%s** (%s)", t.Name, formatSize(t.Size))
-			if err := m.bot.SendNotice(ctx, msg); err != nil {
-				log.Printf("send notice: %v", err)
-			}
+			m.notify(ctx, "⬇️ New download added: ", t.Name, fmt.Sprintf(" (%s)", formatSize(t.Size)))
 		}
 	}
 
@@ -173,42 +181,27 @@ func (m *Monitor) poll(ctx context.Context) error {
 			continue
 		}
 		if prev.Progress < 1.0 && t.Progress >= 1.0 {
-			msg := fmt.Sprintf("✅ Download completed: **%s** (%s)", t.Name, formatSize(t.Size))
-			if err := m.bot.SendNotice(ctx, msg); err != nil {
-				log.Printf("send notice: %v", err)
-			}
+			m.notify(ctx, "✅ Download completed: ", t.Name, fmt.Sprintf(" (%s)", formatSize(t.Size)))
 		}
 		// Started seeding: entered a seeding state from a non-seeding state.
 		// Guard with prev.Progress >= 1.0 to avoid firing on the same tick as
 		// "completed" (downloading→uploading).
 		if prev.Progress >= 1.0 && !isSeedingState(prev.State) && isSeedingState(t.State) {
-			msg := fmt.Sprintf("🌱 Started seeding: **%s**", t.Name)
-			if err := m.bot.SendNotice(ctx, msg); err != nil {
-				log.Printf("send notice: %v", err)
-			}
+			m.notify(ctx, "🌱 Started seeding: ", t.Name, "")
 		}
 		// Stopped seeding: left a seeding state while the torrent still exists.
 		if isSeedingState(prev.State) && !isSeedingState(t.State) {
-			msg := fmt.Sprintf("⏸️ Stopped seeding: **%s**", t.Name)
-			if err := m.bot.SendNotice(ctx, msg); err != nil {
-				log.Printf("send notice: %v", err)
-			}
+			m.notify(ctx, "⏸️ Stopped seeding: ", t.Name, "")
 		}
 		if prev.State != "error" && t.State == "error" {
-			msg := fmt.Sprintf("❌ Download error: **%s**", t.Name)
-			if err := m.bot.SendNotice(ctx, msg); err != nil {
-				log.Printf("send notice: %v", err)
-			}
+			m.notify(ctx, "❌ Download error: ", t.Name, "")
 		}
 	}
 
 	// Detect removed torrents.
 	for hash, t := range m.known {
 		if _, exists := current[hash]; !exists {
-			msg := fmt.Sprintf("🗑️ Download removed: **%s**", t.Name)
-			if err := m.bot.SendNotice(ctx, msg); err != nil {
-				log.Printf("send notice: %v", err)
-			}
+			m.notify(ctx, "🗑️ Download removed: ", t.Name, "")
 		}
 	}
 
