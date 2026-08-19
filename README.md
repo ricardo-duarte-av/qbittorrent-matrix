@@ -6,6 +6,7 @@ A Matrix bot that monitors a qBittorrent instance and posts notifications to a r
 
 | Command | Description |
 |---|---|
+| `!help` | Lists every available command with a short description |
 | `!list` | All torrents with status, progress, size, speeds, ratio, and activity |
 | `!download` / `!downloading` | Torrents actively downloading, with progress, speed, and ETA |
 | `!uploading` | Torrents actively uploading (speed > 0), with upload speed and ratio |

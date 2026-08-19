@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,16 +20,50 @@ import (
 // common case; multiple elements cause multiple messages to be sent in order.
 type CommandFunc func(ctx context.Context, args string) (plains, htmls []string, err error)
 
+type command struct {
+	fn CommandFunc
+	// description is shown by !help. An empty description hides the command
+	// from the listing, which is how aliases are kept out of it.
+	description string
+}
+
 type MatrixBot struct {
 	client   *mautrix.Client
 	roomID   id.RoomID
-	commands map[string]CommandFunc
+	commands map[string]command
 }
 
 // RegisterCommand registers a handler for "!<name>" messages.
+// A command registered with an empty description is hidden from !help; use
+// that for aliases of an already-listed command.
 // Must be called before Start().
-func (b *MatrixBot) RegisterCommand(name string, fn CommandFunc) {
-	b.commands[strings.ToLower(name)] = fn
+func (b *MatrixBot) RegisterCommand(name, description string, fn CommandFunc) {
+	b.commands[strings.ToLower(name)] = command{fn: fn, description: description}
+}
+
+// cmdHelp lists every registered command that has a description.
+func (b *MatrixBot) cmdHelp(_ context.Context, _ string) (plains, htmls []string, err error) {
+	names := make([]string, 0, len(b.commands))
+	for name, cmd := range b.commands {
+		if cmd.description != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+
+	var plain strings.Builder
+	var htmlBody strings.Builder
+	plain.WriteString("Available commands:\n")
+	htmlBody.WriteString("<p><b>Available commands</b></p><ul>")
+	for _, name := range names {
+		desc := b.commands[name].description
+		fmt.Fprintf(&plain, "!%-14s %s\n", name, desc)
+		fmt.Fprintf(&htmlBody, "<li><code>!%s</code> — %s</li>",
+			html.EscapeString(name), html.EscapeString(desc))
+	}
+	htmlBody.WriteString("</ul>")
+
+	return []string{plain.String()}, []string{htmlBody.String()}, nil
 }
 
 func NewMatrixBot(cfg MatrixConfig) (*MatrixBot, error) {
@@ -53,11 +89,13 @@ func NewMatrixBot(cfg MatrixConfig) (*MatrixBot, error) {
 		log.Printf("Logged in as %s", resp.UserID)
 	}
 
-	return &MatrixBot{
+	bot := &MatrixBot{
 		client:   client,
 		roomID:   id.RoomID(cfg.RoomID),
-		commands: make(map[string]CommandFunc),
-	}, nil
+		commands: make(map[string]command),
+	}
+	bot.RegisterCommand("help", "Show this list of commands", bot.cmdHelp)
+	return bot, nil
 }
 
 // SendNotice sends a plain notice to the configured room.
@@ -123,14 +161,14 @@ func (b *MatrixBot) handleMessage(ctx context.Context, evt *event.Event) {
 		args = strings.TrimSpace(parts[1])
 	}
 
-	fn, ok := b.commands[cmd]
+	c, ok := b.commands[cmd]
 	if !ok {
 		return
 	}
 
 	log.Printf("Command !%s from %s", cmd, evt.Sender)
 
-	plains, htmls, err := fn(ctx, args)
+	plains, htmls, err := c.fn(ctx, args)
 	if err != nil {
 		log.Printf("command !%s error: %v", cmd, err)
 		_ = b.SendNotice(ctx, fmt.Sprintf("Error running !%s: %v", cmd, err))

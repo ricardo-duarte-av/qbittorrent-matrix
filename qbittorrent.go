@@ -353,10 +353,10 @@ func formatState(state string) string {
 // RegisterCommands wires up all monitor commands on the bot.
 // Must be called before bot.Start().
 func (m *Monitor) RegisterCommands(bot *MatrixBot) {
-	bot.RegisterCommand("list", m.cmdList)
-	bot.RegisterCommand("download", m.cmdDownloading)
-	bot.RegisterCommand("downloading", m.cmdDownloading)
-	bot.RegisterCommand("uploading", m.cmdUploading)
+	bot.RegisterCommand("list", "List all torrents with full details", m.cmdList)
+	bot.RegisterCommand("downloading", "List torrents currently downloading, with ETA (alias: !download)", m.cmdDownloading)
+	bot.RegisterCommand("download", "", m.cmdDownloading)
+	bot.RegisterCommand("uploading", "List torrents currently uploading, by speed", m.cmdUploading)
 }
 
 // maxEventPayload is the combined character budget for the plain body and
